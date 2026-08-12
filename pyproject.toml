@@ -1,0 +1,8 @@
+[project]
+name = "puresim"
+version = "0.1.0"
+description = "AMM pool simulation with background trading agents"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
