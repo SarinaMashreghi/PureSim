@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -74,24 +75,57 @@ class Provider(ABC):
         return f"{self.__class__.__name__}(model={self.model!r})"
 
 
-def _post_json(url: str, payload: dict, headers: dict[str, str], timeout: int) -> dict:
-    """POST JSON and return the decoded response. Raises ProviderError on failure."""
-    data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=data, method="POST")
-    request.add_header("Content-Type", "application/json")
-    for key, value in headers.items():
-        request.add_header(key, value)
+def _post_json(
+    url: str,
+    payload: dict,
+    headers: dict[str, str],
+    timeout: int,
+    max_retries: int = 4,
+) -> dict:
+    """POST JSON and return the decoded response. Raises ProviderError on failure.
 
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:300]
-        raise ProviderError(f"HTTP {exc.code}: {body}") from exc
-    except urllib.error.URLError as exc:
-        raise ProviderError(f"connection failed: {exc.reason}") from exc
-    except (TimeoutError, json.JSONDecodeError) as exc:
-        raise ProviderError(f"bad response: {exc}") from exc
+    Retries rate limits (429) and transient server errors with exponential
+    backoff, honouring ``Retry-After`` when the server sends one. Free tiers cap
+    requests per minute, and a run fires one request per tick in a tight loop,
+    so without this a long run reliably dies partway through.
+    """
+    data = json.dumps(payload).encode("utf-8")
+    delay = 2.0
+    last_error = "unknown"
+
+    for attempt in range(max_retries):
+        request = urllib.request.Request(url, data=data, method="POST")
+        request.add_header("Content-Type", "application/json")
+        # Some providers sit behind Cloudflare, which blocks urllib's default
+        # "Python-urllib/x.y" User-Agent as a bot signature (HTTP 403, Cloudflare
+        # error 1010). A plain browser-like UA clears it.
+        request.add_header("User-Agent", "Mozilla/5.0 (compatible; PureSim/1.0)")
+        for key, value in headers.items():
+            request.add_header(key, value)
+
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:300]
+            last_error = f"HTTP {exc.code}: {body}"
+            if exc.code not in (429, 500, 502, 503, 504) or attempt == max_retries - 1:
+                raise ProviderError(last_error) from exc
+            # The server usually tells us exactly how long to wait; trust it.
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            try:
+                wait = float(retry_after) if retry_after else delay
+            except ValueError:
+                wait = delay
+            print(f"    [rate limited, retrying in {wait:.1f}s]")
+            time.sleep(min(wait, 30.0))
+            delay *= 2
+        except urllib.error.URLError as exc:
+            raise ProviderError(f"connection failed: {exc.reason}") from exc
+        except (TimeoutError, json.JSONDecodeError) as exc:
+            raise ProviderError(f"bad response: {exc}") from exc
+
+    raise ProviderError(last_error)
 
 
 class AnthropicProvider(Provider):
@@ -265,6 +299,12 @@ class OpenAICompatibleProvider(Provider):
             raise ProviderError(f"set {api_key_env}")
 
     def complete(self, system: str, user: str) -> str:
+        # OpenAI-compatible APIs (including Groq) require the literal word
+        # "json" somewhere in the prompt when response_format is json_object,
+        # or the request 400s — independent of whether the schema itself
+        # mentions JSON. Enforced here rather than baked into the shared system
+        # prompt, since only this provider needs it.
+        system = system + "\n\nRespond with a single JSON object only."
         payload = {
             "model": self.model,
             "messages": [
@@ -289,7 +329,12 @@ class OpenAICompatibleProvider(Provider):
 
 
 def groq_provider(model: str = "llama-3.3-70b-versatile", **kwargs) -> OpenAICompatibleProvider:
-    """Groq — OpenAI-compatible, with a free tier serving open-weights models."""
+    """Groq — OpenAI-compatible, free tier, serves open-weights models fast.
+
+    Groq is a hardware/inference company, not a model lab — it just runs other
+    labs' open-weights models very quickly. Not to be confused with xAI's Grok
+    model, which is a different product with no free tier.
+    """
     return OpenAICompatibleProvider(
         model=model,
         base_url="https://api.groq.com/openai/v1",
@@ -301,15 +346,33 @@ def groq_provider(model: str = "llama-3.3-70b-versatile", **kwargs) -> OpenAICom
 
 #: Short names usable from the CLI. Each entry builds a provider on demand so
 #: that a missing key for one vendor never blocks running another.
+#:
+#: Every entry below is free. Groq's free tier serves open-weights models from
+#: several different labs, so the comparison table can show Meta, Google,
+#: Alibaba, and OpenAI's own open release without a single paid key:
+#:
+#:   groq-llama    Meta      (Llama 3.3 70B)
+#:   groq-gemma    Google    (Gemma 2 9B)
+#:   groq-qwen     Alibaba   (Qwen 2.5 32B)
+#:   groq-gptoss   OpenAI    (gpt-oss 20B, open-weights)
+#:   ollama        anyone    (fully local — no key, no network, no rate limit)
 PROVIDER_FACTORIES = {
+    "groq-llama": lambda: groq_provider(model="llama-3.3-70b-versatile"),
+    "groq-gemma": lambda: groq_provider(model="gemma2-9b-it"),
+    "groq-qwen": lambda: groq_provider(model="qwen2.5-32b-instruct"),
+    "groq-gptoss": lambda: groq_provider(model="openai/gpt-oss-20b"),
+    "ollama": lambda: OllamaProvider(model="llama3.2"),
+    # Paid — kept available but not part of the default free lineup.
     "claude-opus": lambda: AnthropicProvider(model="claude-opus-5"),
     "claude-sonnet": lambda: AnthropicProvider(model="claude-sonnet-5"),
     "claude-haiku": lambda: AnthropicProvider(model="claude-haiku-4-5"),
     "gemini": lambda: GeminiProvider(model="gemini-2.0-flash"),
-    "ollama": lambda: OllamaProvider(model="llama3.2"),
     "openai": lambda: OpenAICompatibleProvider(model="gpt-4o-mini"),
-    "groq": groq_provider,
 }
+
+#: The lineup `run_safety.py --compare` uses when no models are named — every
+#: entry free, spanning four different labs.
+FREE_COMPARISON = ["groq-llama", "groq-gemma", "groq-qwen", "groq-gptoss"]
 
 
 def build_provider(name: str) -> Provider:
