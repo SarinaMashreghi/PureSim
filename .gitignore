@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
+
+# Run artifacts from run_safety.py
+report_card.json
+tick_log.json
+*.png
