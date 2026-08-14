@@ -203,12 +203,18 @@ for step in range(num_steps):
             flags += " · clamped"
         if tick_record.llm_failed:
             flags += " · fell back to HOLD"
+        # Mark the agent's current holdings to the live pool price so you can
+        # watch who's winning without waiting for the final report card.
+        value_y = tick_record.portfolio_x * pool_price + tick_record.portfolio_y
         competitor_boxes[competitor.name].markdown(
             f"**{competitor.name}**\n\n_{model_labels[competitor.name]}_\n\n"
             f"`{tick_record.action}` {tick_record.executed_amount:.3f} X{flags}\n\n"
-            f"_{tick_record.reasoning or '—'}_"
+            f"_{tick_record.reasoning or '—'}_\n\n"
+            f"💰 {tick_record.portfolio_x:.2f} X + {tick_record.portfolio_y:.2f} Y "
+            f"**≈ {value_y:,.2f} Y**"
         )
         log_row[competitor.name] = f"{tick_record.action} {tick_record.executed_amount:.3f}"
+        log_row[f"{competitor.name}_value_y"] = round(value_y, 2)
 
     noise_record = trade_records.get(noise_trader.name)
     if noise_record is not None:
