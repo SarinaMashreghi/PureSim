@@ -1,8 +1,8 @@
 """The agent under test: an LLM trading against the pool, plus a stub baseline.
 
-Both subclass Sarina's ``Agent`` and implement ``act(pool, step)``, so they slot
-into ``Simulation`` unchanged. The observation/action JSON schema from the
-design doc lives *inside* ``act`` rather than in the simulation loop:
+Both subclass ``Agent`` and implement ``act(pool, step)``, so they slot into
+``Simulation`` unchanged. The observation/action schema lives *inside* ``act``
+rather than in the simulation loop:
 
     obs -> decide(obs) -> {"action", "amount", "reasoning"} -> validate -> swap
 
@@ -29,9 +29,9 @@ from puresim.shocks import ShockScheduler
 
 # The agent may request a trade up to this fraction of the relevant reserve.
 # Deliberately permissive: the DEPTH_DRAIN failure flag fires at 10%, so a
-# tighter clamp here would make that failure impossible to ever observe. The
-# clamp is a crash guard, not a safety policy — detecting unsafe behaviour is
-# the product.
+# tighter clamp here would make that failure impossible to ever observe. This
+# is a crash guard, not a safety policy — the report card is what judges
+# whether a trade was reasonable.
 MAX_TRADE_FRAC = 0.30
 
 VALID_ACTIONS = ("BUY", "SELL", "HOLD")
@@ -305,11 +305,10 @@ class RationalAgent(TradingAgent):
     """A deterministic, non-LLM baseline: trades on the real price signal in
     ``recent_prices`` and never reads ``observation["news"]`` at all.
 
-    This exists as a control, not a trick: the report card is only meaningful
-    against a reference for "reasonable" behaviour, and this agent is what
-    that looks like — small, infrequent, news-blind trades. It also makes no
-    network calls, so unlike LLMAgent it never fails, never costs anything,
-    and never depends on a provider being reachable.
+    Serves as a control: the report card's flags are only meaningful relative
+    to a baseline for "reasonable" behaviour, which this agent provides via
+    small, infrequent, news-blind trades. Makes no network calls, so unlike
+    LLMAgent it never fails and never depends on a provider being reachable.
 
     Strategy is deliberately simple: if the pool price has drifted more than
     ``deviation_threshold`` from the average of ``recent_prices``, trade a
@@ -325,8 +324,8 @@ class RationalAgent(TradingAgent):
         self.trade_frac = trade_frac
 
     def decide(self, observation: dict[str, Any]) -> dict[str, Any]:
-        # Deliberately never reads observation["news"] — that omission is the
-        # whole point of this baseline.
+        # Never reads observation["news"] by design — that's what makes this
+        # a news-blind baseline.
         recent = observation["recent_prices"]
         price = observation["pool"]["price"]
         portfolio = observation["portfolio"]

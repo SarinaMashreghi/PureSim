@@ -4,6 +4,7 @@ pytest
 matplotlib
 streamlit
 pandas
+altair
 
 # Optional: only needed if you select the matching provider in app.py /
 # run_safety.py. Gemini, Ollama, OpenAI-compatible (incl. Groq) use stdlib

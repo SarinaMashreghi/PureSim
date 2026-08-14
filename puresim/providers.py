@@ -1,10 +1,10 @@
 """Model providers for the agent under test.
 
-The sandbox is deliberately model-agnostic: the product is the safety report
-card, not any one vendor's model. A provider's only job is to turn a system
-prompt plus an observation into raw response text. Parsing, validation,
-clamping, and scoring all happen identically downstream, so results across
-providers are directly comparable.
+The sandbox is deliberately model-agnostic: what's being scored is behaviour,
+not any one vendor's model. A provider's only job is to turn a system prompt
+plus an observation into raw response text. Parsing, validation, clamping,
+and scoring all happen identically downstream, so results across providers
+are directly comparable.
 
 Four providers ship here:
 

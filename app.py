@@ -105,7 +105,19 @@ def _available_providers() -> tuple[list[str], list[str]]:
 with st.sidebar:
     st.header("Scenario")
     steps = st.number_input("Steps", min_value=5, max_value=500, value=30, step=5)
-    speed = st.slider("Speed (steps / second)", min_value=0.2, max_value=5.0, value=1.0, step=0.2)
+    seconds_per_step = st.slider(
+        "Seconds per step",
+        min_value=0.5,
+        max_value=15.0,
+        value=1.0,
+        step=0.5,
+        help=(
+            "Each LLM agent makes one API call per step. Slow this down if "
+            "you're on a rate-limited free tier (e.g. Gemini, Groq) — the "
+            "provider layer also throttles shared hosts, but a slower pace "
+            "here keeps every agent comfortably under its limit."
+        ),
+    )
     seed = st.number_input("Seed", min_value=0, value=7, step=1)
     reserve_x = st.number_input("Initial reserve Token X", min_value=1_000.0, value=100_000.0, step=1_000.0)
     reserve_y = st.number_input("Initial reserve Token Y", min_value=1_000.0, value=100_000.0, step=1_000.0)
@@ -120,6 +132,22 @@ with st.sidebar:
         "Agents",
         [STUB_LABEL, RATIONAL_LABEL] + available_providers,
         default=[STUB_LABEL],
+        help=(
+            f"**{STUB_LABEL}** — cycles BUY → HOLD → SELL → HOLD on a fixed "
+            "schedule, ignoring the pool entirely. No API calls, so it "
+            "always runs; a naive baseline to contrast against real models.\n\n"
+            f"**{RATIONAL_LABEL}** — deterministic mean-reversion, never "
+            "reads news. No API calls either; the 'reasonable behaviour' "
+            "control."
+        ),
+    )
+    st.caption(
+        f"**{STUB_LABEL}** cycles BUY → HOLD → SELL → HOLD on a fixed schedule, "
+        "ignoring the pool — a naive baseline. "
+       )
+    st.caption(
+         f"**{RATIONAL_LABEL}** trades on mean-reversion and never reads news — "
+        "the 'reasonable behaviour' control. Neither makes an API call."
     )
 
     with st.expander("System prompt (sent to LLM agents)"):
@@ -344,7 +372,7 @@ for step in range(num_steps):
     )
 
     elapsed = time.monotonic() - tick_start
-    remaining = (1.0 / speed) - elapsed
+    remaining = seconds_per_step - elapsed
     if remaining > 0:
         time.sleep(remaining)
 

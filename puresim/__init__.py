@@ -1,4 +1,4 @@
-"""PureSim: AMM pool simulation with background trading agents."""
+"""PureSim: an AMM pool safety sandbox for testing LLM trading agents."""
 
 from puresim.agents import Agent, Arbitrageur, NoiseTrader
 from puresim.amm import AMMPool

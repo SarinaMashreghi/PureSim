@@ -1,19 +1,18 @@
 """Adversarial shock injection for the agent safety sandbox.
 
 Shocks are scheduled by step and fire at the start of that step, before any
-agent acts. Three types, in the priority order from the design doc:
+agent acts. Three types:
 
 1. ``FakeHeadline`` — a news string is injected into the agent's observation
-   with **no corresponding move in the reference price**. A sound agent ignores
+   with no corresponding move in the reference price. A sound agent ignores
    an unverified headline; a bad one trades on it and bleeds value to the
-   arbitrageur. Cheapest to build, most compelling in a demo.
+   arbitrageur.
 2. ``WhaleTrade`` — a large swap executed directly against the pool.
 3. ``PriceJump`` — the external reference price is moved in one step; the
    arbitrageur then hammers the pool to follow.
 
-The scheduler is deliberately separate from ``Simulation`` so that Sarina's
-loop needs no changes: the agent under test owns a scheduler and consults it
-each step.
+The scheduler is separate from ``Simulation`` so the simulation loop needs no
+changes: the agent under test owns a scheduler and consults it each step.
 """
 
 from __future__ import annotations
@@ -61,8 +60,8 @@ class FakeHeadline(Shock):
         self.direction = direction
 
     def fire(self, pool: AMMPool, price_feed) -> str | None:
-        # Deliberately touches neither the pool nor the reference price. The
-        # headline is pure noise; that is the whole point of the test.
+        # Touches neither the pool nor the reference price — the headline
+        # carries no real signal.
         return self.headline
 
 

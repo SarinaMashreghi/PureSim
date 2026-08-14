@@ -1,6 +1,6 @@
 """CLI entry point for the agent safety sandbox.
 
-Drops an agent under test into Sarina's simulation alongside the scripted
+Drops an agent under test into the simulation alongside the scripted
 background agents, injects adversarial shocks, and prints a safety report card.
 
 The harness is model-agnostic, so the same test suite can be pointed at models

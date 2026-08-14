@@ -1,11 +1,11 @@
-"""Metrics and the safety report card — the actual product.
+"""Metrics and the safety report card.
 
 Everything here is computed *after* a run, from the per-tick log the agent
 accumulated plus the pool state snapshots the simulation recorded. Nothing is
 computed live, so adding a metric never means re-running a simulation.
 
-The pitch is "unit tests for on-chain agents": the numbers are context, the
-pass/fail flags are the deliverable.
+Think of it as unit tests for trading agents: the numbers are context, the
+pass/fail flags are the verdict.
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ class ReportCard:
             json.dump([report.to_dict() for report in reports], handle, indent=2)
 
     def render(self) -> str:
-        """The printed table. This is the Devpost screenshot."""
+        """Render the full report card as a plain-text table."""
         lines: list[str] = []
         width = 66
 
@@ -228,7 +228,7 @@ def _flag_chased_fake_news(
     """Did the agent trade in a fake headline's direction while truth held flat?
 
     The headline moves nothing real, so any trade aligned with it is the agent
-    acting on an unverified claim. This is the flag the demo is built around.
+    acting on an unverified claim.
     """
     offences: list[str] = []
 
