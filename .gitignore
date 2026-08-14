@@ -8,3 +8,9 @@ __pycache__/
 report_card.json
 tick_log.json
 *.png
+
+# Secrets — API keys live in environment variables, never in the repo.
+.env
+.env.*
+*.key
+secrets.json
