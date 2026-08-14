@@ -44,6 +44,22 @@ ACTION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+# Same shape, but requires at least one character of reasoning. Only used
+# where the endpoint actually enforces the schema via constrained decoding
+# (see `use_strict_schema` on OpenAICompatibleProvider) — under json_object
+# mode a minLength constraint would just be ignored, so it isn't worth
+# adding there.
+STRICT_ACTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": ["BUY", "SELL", "HOLD"]},
+        "amount": {"type": "number"},
+        "reasoning": {"type": "string", "minLength": 1},
+    },
+    "required": ["action", "amount", "reasoning"],
+    "additionalProperties": False,
+}
+
 DEFAULT_TIMEOUT = 60
 
 
@@ -320,6 +336,7 @@ class OpenAICompatibleProvider(Provider):
         vendor: str | None = None,
         timeout: int = DEFAULT_TIMEOUT,
         min_request_interval: float = 0.0,
+        use_strict_schema: bool = False,
     ) -> None:
         super().__init__(model)
         self.base_url = base_url.rstrip("/")
@@ -328,6 +345,11 @@ class OpenAICompatibleProvider(Provider):
         # groq-* competitor in a --compete run) is spaced out together rather
         # than each independently believing it has the full rate limit.
         self.min_request_interval = min_request_interval
+        # json_object mode only guarantees syntactically valid JSON — a model
+        # can satisfy it with `"reasoning": ""` and nothing catches that. Only
+        # a few endpoints/models support real constrained decoding against a
+        # schema (currently: OpenAI's gpt-oss family on Groq); this opts in.
+        self.use_strict_schema = use_strict_schema
         if vendor:
             self.vendor = vendor
 
@@ -336,21 +358,31 @@ class OpenAICompatibleProvider(Provider):
             raise ProviderError(f"set {api_key_env}")
 
     def complete(self, system: str, user: str) -> str:
-        # OpenAI-compatible APIs (including Groq) require the literal word
-        # "json" somewhere in the prompt when response_format is json_object,
-        # or the request 400s — independent of whether the schema itself
-        # mentions JSON. Enforced here rather than baked into the shared system
-        # prompt, since only this provider needs it.
-        system = system + "\n\nRespond with a single JSON object only."
+        if self.use_strict_schema:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "trade_action",
+                    "strict": True,
+                    "schema": STRICT_ACTION_SCHEMA,
+                },
+            }
+        else:
+            # OpenAI-compatible APIs (including Groq) require the literal
+            # word "json" somewhere in the prompt when response_format is
+            # json_object, or the request 400s — independent of whether the
+            # schema itself mentions JSON. Enforced here rather than baked
+            # into the shared system prompt, since only this mode needs it.
+            system = system + "\n\nRespond with a single JSON object only."
+            response_format = {"type": "json_object"}
+
         payload = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            # json_object is the widely supported mode; strict schemas vary by
-            # endpoint, and the downstream parser validates regardless.
-            "response_format": {"type": "json_object"},
+            "response_format": response_format,
         }
         body = _post_json(
             f"{self.base_url}/chat/completions",
@@ -410,7 +442,10 @@ def groq_provider(
 PROVIDER_FACTORIES = {
     "groq-llama": lambda: groq_provider(model="llama-3.3-70b-versatile"),
     "groq-qwen": lambda: groq_provider(model="qwen-2.5-32b"),
-    "groq-gptoss": lambda: groq_provider(model="openai/gpt-oss-20b"),
+    # Only gpt-oss on Groq supports strict schema-constrained decoding (as of
+    # 2026-08-13, per console.groq.com/docs/structured-outputs) — Llama and
+    # Qwen there still get the best-effort json_object mode above.
+    "groq-gptoss": lambda: groq_provider(model="openai/gpt-oss-20b", use_strict_schema=True),
     "ollama": lambda: OllamaProvider(model="llama3.2"),
     # Paid — kept available but not part of the default free lineup.
     "claude-opus": lambda: AnthropicProvider(model="claude-opus-5"),
