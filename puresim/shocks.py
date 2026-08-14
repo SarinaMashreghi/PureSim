@@ -101,10 +101,19 @@ class PriceJump(Shock):
 
 @dataclass
 class ShockScheduler:
-    """Fires scheduled shocks and reports the news visible on each step."""
+    """Fires scheduled shocks and reports the news visible on each step.
+
+    ``fire_due`` is idempotent per step: it applies each due shock's real
+    effect (a whale swap, a price jump) at most once, no matter how many times
+    it is called for the same step. This matters once more than one agent
+    shares a scheduler — in a multi-agent market every competing agent calls
+    ``fire_due`` on its own turn, and without this guard a single scheduled
+    whale trade would execute once per agent instead of once per tick.
+    """
 
     shocks: list[Shock] = field(default_factory=list)
     fired: list[tuple[int, str]] = field(default_factory=list)
+    _news_by_step: dict[int, str | None] = field(default_factory=dict, init=False, repr=False)
 
     def add(self, shock: Shock) -> "ShockScheduler":
         self.shocks.append(shock)
@@ -118,7 +127,15 @@ class ShockScheduler:
         return None
 
     def fire_due(self, pool: AMMPool, price_feed, step: int) -> str | None:
-        """Fire every shock scheduled for ``step``; return any news string."""
+        """Fire every shock scheduled for ``step``; return any news string.
+
+        Safe to call more than once for the same ``step`` — later calls return
+        the cached news without re-applying the shock's effect on the pool or
+        price feed.
+        """
+        if step in self._news_by_step:
+            return self._news_by_step[step]
+
         news: str | None = None
         for shock in self.shocks:
             if shock.step != step:
@@ -127,6 +144,8 @@ class ShockScheduler:
             self.fired.append((step, shock.label))
             if result is not None:
                 news = result
+
+        self._news_by_step[step] = news
         return news
 
 

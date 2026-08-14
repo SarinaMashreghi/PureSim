@@ -356,28 +356,49 @@ def _flag_overtraded(total_fees: float, agent: TradingAgent, step_logs: list) ->
     )
 
 
-def render_comparison(reports: list[ReportCard]) -> str:
+def render_comparison(reports: list[ReportCard], leaderboard: bool = False) -> str:
     """Render several models' report cards side by side.
 
-    This is the strongest single artefact the project produces: one test suite,
-    one scenario, several vendors' agents, and a visible split in which ones
-    behave safely under stress.
+    With ``leaderboard=False`` (the default), reports are shown in the order
+    given — appropriate for ``--compare``, where each model ran in isolation
+    under identical conditions and order carries no meaning.
+
+    With ``leaderboard=True``, reports are ranked by PnL vs. hold, highest
+    first — appropriate for ``--compete``, where the models traded against the
+    same shared pool at the same time and are genuinely being ranked against
+    each other. Inconclusive runs (an agent that mostly failed to respond)
+    are always sorted to the bottom regardless of their nominal PnL, since
+    that PnL reflects inactivity, not skill.
     """
     if not reports:
         return "No reports to compare."
 
+    if leaderboard:
+        reports = sorted(
+            reports,
+            key=lambda r: (
+                r.inconclusive,
+                -r.metrics.get("Agent PnL vs. hold (Y)", 0.0),
+            ),
+        )
+
     flag_names = [flag.name for flag in reports[0].flags]
+    rank_col = 5 if leaderboard else 0
     model_col = max(max(len(r.model) for r in reports), len("MODEL")) + 2
     flag_col = 18
-    width = model_col + flag_col * len(flag_names) + 12
+    width = rank_col + model_col + flag_col * len(flag_names) + 12
 
     lines: list[str] = []
     lines.append("=" * width)
-    lines.append("  CROSS-MODEL SAFETY COMPARISON".ljust(width))
-    lines.append(f"  Identical pool, price path, and shock schedule for every model.")
+    title = "MARKET LEADERBOARD" if leaderboard else "CROSS-MODEL SAFETY COMPARISON"
+    lines.append(f"  {title}".ljust(width))
+    if leaderboard:
+        lines.append("  Same shared pool, same tick, same shocks - models traded head to head.")
+    else:
+        lines.append("  Identical pool, price path, and shock schedule for every model.")
     lines.append("=" * width)
 
-    header = "  " + "MODEL".ljust(model_col)
+    header = "  " + ("RANK".ljust(rank_col) if leaderboard else "") + "MODEL".ljust(model_col)
     for name in flag_names:
         # Trim the flag name to fit; full names appear on each report card.
         header += name[: flag_col - 2].ljust(flag_col)
@@ -385,8 +406,11 @@ def render_comparison(reports: list[ReportCard]) -> str:
     lines.append(header)
     lines.append("-" * width)
 
-    for report in reports:
-        row = "  " + report.model.ljust(model_col)
+    for rank, report in enumerate(reports, start=1):
+        row = "  "
+        if leaderboard:
+            row += f"#{rank}".ljust(rank_col)
+        row += report.model.ljust(model_col)
         by_name = {flag.name: flag for flag in report.flags}
         for name in flag_names:
             flag = by_name.get(name)

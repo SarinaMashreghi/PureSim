@@ -1,9 +1,16 @@
 """Streamlit UI for the PureSim agent safety sandbox.
 
-Runs the same scenario as run_safety.py — a pool, NoiseTrader, Arbitrageur,
-and a trading agent under test (stub or LLM), with adversarial shocks — but
-renders it live, one step at a time, so each agent's decision is visible as
-it happens rather than only in a post-run report.
+Runs the same scenario as run_safety.py — a pool, NoiseTrader, Arbitrageur, and
+one or more trading agents under test (stub and/or LLM), with adversarial
+shocks — but renders it live, one step at a time, so each agent's decision is
+visible as it happens rather than only in a post-run report.
+
+Selecting exactly one agent in the sidebar reproduces `run_safety.py`'s
+single-agent mode. Selecting two or more turns it into `--compete`: every
+selected agent trades against the same shared pool at the same time, turn
+order is reshuffled each tick (matching Simulation(randomize_order=True)) so
+no agent gets a permanent first-mover edge, and the run ends with a ranked
+leaderboard instead of one lone report card.
 
 Deliberately reuses the existing building blocks (AMMPool, agents, shocks,
 providers, metrics) rather than duplicating any simulation logic; this file
@@ -12,14 +19,15 @@ only owns the step-by-step loop and how it's drawn.
 
 from __future__ import annotations
 
+import random
 import time
 
 import pandas as pd
 import streamlit as st
 
-from puresim.agents import Arbitrageur, NoiseTrader
+from puresim.agents import Agent, Arbitrageur, NoiseTrader
 from puresim.amm import AMMPool
-from puresim.metrics import build_report
+from puresim.metrics import build_report, render_comparison
 from puresim.price_feed import RandomWalkPriceFeed
 from puresim.providers import PROVIDER_FACTORIES, ProviderError, build_provider
 from puresim.shocks import default_schedule
@@ -31,8 +39,9 @@ STUB_LABEL = "stub (no API)"
 st.set_page_config(page_title="PureSim Safety Sandbox", layout="wide")
 st.title("PureSim — Agent Safety Sandbox")
 st.caption(
-    "A pool, two scripted background agents, and a trading agent under test — "
-    "watch each one's decision as the simulation runs."
+    "A pool, two scripted background agents, and one or more trading agents "
+    "under test — watch each one's decision as the simulation runs. Pick "
+    "several agents to have them compete live in the same pool."
 )
 
 with st.sidebar:
@@ -44,10 +53,15 @@ with st.sidebar:
     reserve_y = st.number_input("Initial reserve Y", min_value=1_000.0, value=100_000.0, step=1_000.0)
     enable_shocks = st.checkbox("Enable shocks (fake news / whale / price jump)", value=True)
 
-    st.header("Agent under test")
-    provider_choice = st.selectbox("Provider", [STUB_LABEL] + sorted(PROVIDER_FACTORIES))
-    agent_x = st.number_input("Agent starting X", min_value=0.0, value=500.0, step=50.0)
-    agent_y = st.number_input("Agent starting Y", min_value=0.0, value=500.0, step=50.0)
+    st.header("Agents under test")
+    st.caption("Pick one to test a single agent, or several to run them as a live market.")
+    provider_choices = st.multiselect(
+        "Agents",
+        [STUB_LABEL] + sorted(PROVIDER_FACTORIES),
+        default=[STUB_LABEL],
+    )
+    agent_x = st.number_input("Each agent's starting X", min_value=0.0, value=500.0, step=50.0)
+    agent_y = st.number_input("Each agent's starting Y", min_value=0.0, value=500.0, step=50.0)
 
     start = st.button("Start simulation", type="primary")
 
@@ -55,10 +69,8 @@ if not start:
     st.info("Set your scenario in the sidebar and click **Start simulation**.")
     st.stop()
 
-try:
-    provider = None if provider_choice == STUB_LABEL else build_provider(provider_choice)
-except ProviderError as exc:
-    st.error(f"Could not start provider {provider_choice!r}: {exc}")
+if not provider_choices:
+    st.error("Pick at least one agent to test.")
     st.stop()
 
 num_steps = int(steps)
@@ -77,15 +89,40 @@ agent_kwargs = dict(
     price_feed=price_feed,
     verbose=False,
 )
-if provider is None:
-    agent = StubAgent("StubAgent", **agent_kwargs)
-    model_label = "none (stub)"
-else:
-    agent = LLMAgent("LLMAgent", provider=provider, **agent_kwargs)
-    model_label = provider.label
+
+competitors: list[Agent] = []
+model_labels: dict[str, str] = {}
+for choice in provider_choices:
+    if choice == STUB_LABEL:
+        stub = StubAgent(STUB_LABEL, **agent_kwargs)
+        competitors.append(stub)
+        model_labels[stub.name] = "none (stub)"
+        continue
+
+    try:
+        provider = build_provider(choice)
+    except ProviderError as exc:
+        st.warning(f"Skipped {choice!r}: {exc}")
+        continue
+
+    llm_agent = LLMAgent(choice, provider=provider, **agent_kwargs)
+    competitors.append(llm_agent)
+    model_labels[llm_agent.name] = provider.label
+
+if not competitors:
+    st.error("None of the selected agents could be started. Check API keys in the sidebar choices.")
+    st.stop()
+
+is_market = len(competitors) > 1
 
 noise_trader = NoiseTrader(seed=int(seed))
 arbitrageur = Arbitrageur(price_feed=price_feed)
+# Background agents always take part; competitors join alongside them. Turn
+# order is only reshuffled when there's real competition to be fair about —
+# a single agent under test keeps the fixed agent -> noise -> arb order that
+# run_safety.py's single-provider mode uses.
+turn_pool: list[Agent] = [*competitors, noise_trader, arbitrageur]
+turn_rng = random.Random(int(seed)) if is_market else None
 
 status = st.empty()
 
@@ -99,10 +136,10 @@ chart_placeholder = st.empty()
 news_placeholder = st.empty()
 
 st.subheader("This tick's decisions")
-decision_cols = st.columns(3)
-agent_box = decision_cols[0].empty()
-noise_box = decision_cols[1].empty()
-arb_box = decision_cols[2].empty()
+decision_cols = st.columns(len(competitors) + 2)
+competitor_boxes = {c.name: decision_cols[i].empty() for i, c in enumerate(competitors)}
+noise_box = decision_cols[len(competitors)].empty()
+arb_box = decision_cols[len(competitors) + 1].empty()
 
 st.subheader("Tick log")
 log_placeholder = st.empty()
@@ -116,16 +153,17 @@ for step in range(num_steps):
 
     reference_price = price_feed.get_next_price()
 
-    agent.act(pool, step)
-    tick_record = agent.log[-1]
+    order = list(turn_pool)
+    if turn_rng is not None:
+        turn_rng.shuffle(order)
 
-    history_before = len(pool.history)
-    noise_trader.act(pool, step)
-    noise_record = pool.history[-1] if len(pool.history) > history_before else None
-
-    history_before = len(pool.history)
-    arbitrageur.act(pool, step)
-    arb_record = pool.history[-1] if len(pool.history) > history_before else None
+    history_before_by_agent: dict[str, int] = {}
+    trade_records: dict[str, object] = {}
+    for participant in order:
+        history_before_by_agent[participant.name] = len(pool.history)
+        participant.act(pool, step)
+        if len(pool.history) > history_before_by_agent[participant.name]:
+            trade_records[participant.name] = pool.history[-1]
 
     pool_price = pool.get_price()
     step_logs.append(
@@ -149,29 +187,39 @@ for step in range(num_steps):
     price_rows.append({"step": step, "pool_price": pool_price, "reference_price": reference_price})
     chart_placeholder.line_chart(pd.DataFrame(price_rows).set_index("step"))
 
-    if tick_record.news:
-        news_placeholder.info(f"\U0001F4F0 {tick_record.news}")
+    # Every competitor sees the same news this tick (the scheduler caches it
+    # per step), so any one of them can supply it for display.
+    tick_news = competitors[0].log[-1].news if competitors[0].log else None
+    if tick_news:
+        news_placeholder.info(f"\U0001F4F0 {tick_news}")
     else:
         news_placeholder.empty()
 
-    flags = ""
-    if tick_record.clamped:
-        flags += " · clamped"
-    if tick_record.llm_failed:
-        flags += " · fell back to HOLD"
-    agent_box.markdown(
-        f"**{model_label}**\n\n"
-        f"`{tick_record.action}` {tick_record.executed_amount:.3f} X{flags}\n\n"
-        f"_{tick_record.reasoning or '—'}_"
-    )
+    log_row = {"step": step}
+    for competitor in competitors:
+        tick_record = competitor.log[-1]
+        flags = ""
+        if tick_record.clamped:
+            flags += " · clamped"
+        if tick_record.llm_failed:
+            flags += " · fell back to HOLD"
+        competitor_boxes[competitor.name].markdown(
+            f"**{competitor.name}**\n\n_{model_labels[competitor.name]}_\n\n"
+            f"`{tick_record.action}` {tick_record.executed_amount:.3f} X{flags}\n\n"
+            f"_{tick_record.reasoning or '—'}_"
+        )
+        log_row[competitor.name] = f"{tick_record.action} {tick_record.executed_amount:.3f}"
 
+    noise_record = trade_records.get(noise_trader.name)
     if noise_record is not None:
         noise_box.markdown(
             f"**NoiseTrader**\n\nsold {noise_record.amount_in:.3f} {noise_record.token_in}"
         )
     else:
         noise_box.markdown("**NoiseTrader**\n\nno trade")
+    log_row["noise"] = "trade" if noise_record is not None else "-"
 
+    arb_record = trade_records.get(arbitrageur.name)
     if arb_record is not None:
         arb_box.markdown(
             f"**Arbitrageur**\n\nsold {arb_record.amount_in:.3f} {arb_record.token_in}\n\n"
@@ -181,18 +229,11 @@ for step in range(num_steps):
         arb_box.markdown(
             f"**Arbitrageur**\n\nno trade\n\ncumulative profit: {arbitrageur.cumulative_profit:,.2f} Y"
         )
+    log_row["arb"] = "trade" if arb_record is not None else "-"
 
-    log_rows.append(
-        {
-            "step": step,
-            "agent": tick_record.action,
-            "amount": round(tick_record.executed_amount, 3),
-            "noise": "trade" if noise_record is not None else "-",
-            "arb": "trade" if arb_record is not None else "-",
-            "pool_price": round(pool_price, 4),
-            "reference_price": round(reference_price, 4),
-        }
-    )
+    log_row["pool_price"] = round(pool_price, 4)
+    log_row["reference_price"] = round(reference_price, 4)
+    log_rows.append(log_row)
     log_placeholder.dataframe(
         pd.DataFrame(log_rows[-25:]), width="stretch", hide_index=True
     )
@@ -204,14 +245,23 @@ for step in range(num_steps):
 
 status.markdown(f"**Simulation complete — {num_steps} steps.**")
 
-report = build_report(
-    agent=agent,
-    pool=pool,
-    step_logs=step_logs,
-    scheduler=scheduler,
-    model=model_label,
-    initial_pool_x=reserve_x,
-    initial_pool_y=reserve_y,
-)
-st.subheader("Safety report card")
-st.code(report.render())
+reports = [
+    build_report(
+        agent=competitor,
+        pool=pool,
+        step_logs=step_logs,
+        scheduler=scheduler,
+        model=model_labels[competitor.name],
+        initial_pool_x=reserve_x,
+        initial_pool_y=reserve_y,
+    )
+    for competitor in competitors
+]
+
+st.subheader("Safety report card" if len(reports) == 1 else "Safety report cards")
+for report in reports:
+    st.code(report.render())
+
+if is_market:
+    st.subheader("Market leaderboard")
+    st.code(render_comparison(reports, leaderboard=True))

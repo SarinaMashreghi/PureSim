@@ -10,10 +10,16 @@ Examples:
     python run_safety.py --steps 60 --seed 7
     python run_safety.py --steps 60 --seed 7 --provider ollama
     python run_safety.py --steps 60 --seed 7 --compare gemini ollama claude-haiku
+    python run_safety.py --steps 60 --seed 7 --compete groq-llama groq-gemma groq-qwen
 
-Every provider runs against an identical pool, price path, and shock schedule
-when --seed is fixed, so differences in the report card are attributable to the
-model rather than to luck.
+--compare runs each provider in its own isolated pool (same seed, so an
+identical price path) — a controlled A/B test of one model against another.
+
+--compete puts every named provider into ONE shared pool at the same time,
+alongside the noise trader and arbitrageur, all fighting over the same
+liquidity. This is a genuine market: one agent's trade moves the price the
+next agent sees. Turn order is randomized each tick so no model gets a
+permanent first-mover edge.
 """
 
 from __future__ import annotations
@@ -51,7 +57,15 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=None,
         metavar="PROVIDER",
-        help="Run several providers on an identical scenario and compare them.",
+        help="Run several providers in isolated pools on an identical scenario.",
+    )
+    parser.add_argument(
+        "--compete",
+        type=str,
+        nargs="+",
+        default=None,
+        metavar="PROVIDER",
+        help="Run several providers as competing traders in ONE shared pool.",
     )
 
     parser.add_argument(
@@ -154,8 +168,116 @@ def run_one(args: argparse.Namespace, provider_name: str | None) -> tuple[Report
     return report, (agent, simulation)
 
 
+def run_market(
+    args: argparse.Namespace, provider_names: list[str]
+) -> tuple[list[ReportCard], Simulation]:
+    """Run several providers as competing traders sharing one pool.
+
+    Unlike ``run_one``, every competitor here acts on the *same* AMMPool,
+    price feed, and shock scheduler in the same simulation. They are not
+    measured in isolation — they trade against each other's price impact in
+    real time. Providers that fail to even initialize (e.g. a missing API
+    key) are skipped and simply don't join the market; the rest still compete.
+    """
+    initial_price = args.initial_reserve_y / args.initial_reserve_x
+
+    pool = AMMPool(reserve_x=args.initial_reserve_x, reserve_y=args.initial_reserve_y)
+    price_feed = RandomWalkPriceFeed(initial_price=initial_price, seed=args.seed)
+
+    scheduler = default_schedule(args.steps)
+    if args.no_shocks:
+        scheduler.shocks.clear()
+
+    competitors = []
+    # Disambiguate if the same provider is entered twice, so pool.history and
+    # the leaderboard can still tell the two instances apart.
+    name_counts: dict[str, int] = {}
+    for provider_name in provider_names:
+        try:
+            provider = build_provider(provider_name)
+        except ProviderError as exc:
+            print(f"  SKIPPED {provider_name}: {exc}")
+            continue
+
+        name_counts[provider_name] = name_counts.get(provider_name, 0) + 1
+        suffix = "" if name_counts[provider_name] == 1 else f"-{name_counts[provider_name]}"
+        agent_name = f"{provider_name}{suffix}"
+
+        competitors.append(
+            LLMAgent(
+                agent_name,
+                provider=provider,
+                initial_x=args.agent_x,
+                initial_y=args.agent_y,
+                scheduler=scheduler,
+                price_feed=price_feed,
+                verbose=not args.quiet,
+            )
+        )
+
+    if not competitors:
+        raise ProviderError("no providers were runnable for --compete")
+
+    # Turn order is randomized each tick so no competitor gets a permanent
+    # first-mover edge on the shared pool.
+    simulation = Simulation(
+        pool=pool,
+        price_feed=price_feed,
+        agents=[*competitors, NoiseTrader(seed=args.seed), Arbitrageur(price_feed=price_feed)],
+        num_steps=args.steps,
+        randomize_order=True,
+        seed=args.seed,
+    )
+
+    print(f"Running {args.steps} steps | {len(competitors)} competing agent(s):")
+    for competitor in competitors:
+        print(f"  {competitor.name:<20} {competitor.provider.label}")
+    if scheduler.shocks:
+        print("Scheduled shocks:")
+        for shock in scheduler.shocks:
+            print(f"  t={shock.step:<4} {shock.label}")
+    print()
+
+    simulation.run()
+    print()
+
+    reports = [
+        build_report(
+            agent=competitor,
+            pool=pool,
+            step_logs=simulation.step_logs,
+            scheduler=scheduler,
+            model=competitor.provider.label,
+            initial_pool_x=args.initial_reserve_x,
+            initial_pool_y=args.initial_reserve_y,
+        )
+        for competitor in competitors
+    ]
+    return reports, simulation
+
+
 def main() -> None:
     args = parse_args()
+
+    if args.compete:
+        try:
+            reports, simulation = run_market(args, args.compete)
+        except ProviderError as exc:
+            print(f"Could not start the market: {exc}")
+            return
+
+        for report in reports:
+            print(report.render())
+            print()
+
+        print(render_comparison(reports, leaderboard=True))
+        ReportCard.save_many(reports, args.report_output)
+        print(f"\nWrote {args.report_output}")
+
+        if args.plot_output:
+            simulation.plot_price_history(args.plot_output)
+            print(f"Saved price history plot to {args.plot_output}")
+        return
 
     if args.compare:
         reports: list[ReportCard] = []
