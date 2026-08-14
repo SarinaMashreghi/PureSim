@@ -1,10 +1,5 @@
 """Streamlit UI for the PureSim agent safety sandbox.
 
-Runs the same scenario as run_safety.py — a pool, NoiseTrader, Arbitrageur, and
-one or more trading agents under test (stub and/or LLM), with adversarial
-shocks — but renders it live, one step at a time, so each agent's decision is
-visible as it happens rather than only in a post-run report.
-
 Selecting exactly one agent in the sidebar reproduces `run_safety.py`'s
 single-agent mode. Selecting two or more turns it into `--compete`: every
 selected agent trades against the same shared pool at the same time, turn
@@ -12,9 +7,6 @@ order is reshuffled each tick (matching Simulation(randomize_order=True)) so
 no agent gets a permanent first-mover edge, and the run ends with a ranked
 leaderboard instead of one lone report card.
 
-Deliberately reuses the existing building blocks (AMMPool, agents, shocks,
-providers, metrics) rather than duplicating any simulation logic; this file
-only owns the step-by-step loop and how it's drawn.
 """
 
 from __future__ import annotations
@@ -22,8 +14,11 @@ from __future__ import annotations
 import random
 import time
 
+import altair as alt
 import pandas as pd
 import streamlit as st
+
+from pathlib import Path
 
 from puresim.agents import Agent, Arbitrageur, NoiseTrader
 from puresim.amm import AMMPool
@@ -32,38 +27,109 @@ from puresim.price_feed import RandomWalkPriceFeed
 from puresim.providers import PROVIDER_FACTORIES, ProviderError, build_provider
 from puresim.shocks import default_schedule
 from puresim.simulation import StepLog
-from puresim.trading_agent import LLMAgent, RationalAgent, StubAgent
+from puresim.trading_agent import SYSTEM_PROMPT, LLMAgent, RationalAgent, StubAgent
 
 STUB_LABEL = "stub (no API)"
 RATIONAL_LABEL = "rational baseline (no API)"
+LOGO_PATH = Path(__file__).parent / "logo.svg"
 
-st.set_page_config(page_title="PureSim Safety Sandbox", layout="wide")
-st.title("PureSim — Agent Safety Sandbox")
-st.caption(
-    "A pool, two scripted background agents, and one or more trading agents "
-    "under test — watch each one's decision as the simulation runs. Pick "
-    "several agents to have them compete live in the same pool."
+BG = "#0B0F14"
+GRADIENT_FROM = "#60A5FA"
+GRADIENT_TO = "#5EEAD4"
+TEXT = "#F1F5F9"
+
+st.set_page_config(page_title="PureSim Safety Sandbox", layout="wide", page_icon="🔷")
+
+st.markdown(
+    f"""
+    <style>
+    h1, h2, h3 {{
+        background: linear-gradient(90deg, {GRADIENT_FROM}, {GRADIENT_TO});
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }}
+    div[data-testid="stMarkdownContainer"] hr {{
+        border: none !important;
+        height: 2px !important;
+        background: linear-gradient(90deg, {GRADIENT_FROM}, {GRADIENT_TO}) !important;
+        margin: 0.5rem 0 1.5rem 0 !important;
+    }}
+    div.stButton > button[kind="primary"] {{
+        background: linear-gradient(90deg, {GRADIENT_FROM}, {GRADIENT_TO});
+        color: {BG};
+        border: none;
+        font-weight: 600;
+    }}
+    div.stButton > button[kind="primary"]:hover {{
+        filter: brightness(1.08);
+        color: {BG};
+    }}
+    [data-testid="stMetricValue"] {{
+        color: {GRADIENT_TO};
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
+
+if LOGO_PATH.exists():
+    _, logo_col, _ = st.columns([1, 2, 1])
+    with logo_col:
+        st.image(str(LOGO_PATH), width=400)
+else:
+    st.title("PureSim — Agent Safety Sandbox")
+
+st.markdown("<hr>", unsafe_allow_html=True)
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def _available_providers() -> tuple[list[str], list[str]]:
+    """Which PROVIDER_FACTORIES entries can actually build right now.
+
+    A provider fails to build only on a missing key/SDK (checked locally, no
+    network call), so this is a cheap, safe probe to run on every rerun.
+    Free/local providers (e.g. ollama) never fail here and are always
+    available regardless of whether the server happens to be reachable.
+    """
+    available, unavailable = [], []
+    for name in sorted(PROVIDER_FACTORIES):
+        try:
+            build_provider(name)
+            available.append(name)
+        except ProviderError:
+            unavailable.append(name)
+    return available, unavailable
+
 
 with st.sidebar:
     st.header("Scenario")
-    steps = st.number_input("Steps", min_value=5, max_value=500, value=60, step=5)
+    steps = st.number_input("Steps", min_value=5, max_value=500, value=30, step=5)
     speed = st.slider("Speed (steps / second)", min_value=0.2, max_value=5.0, value=1.0, step=0.2)
     seed = st.number_input("Seed", min_value=0, value=7, step=1)
-    reserve_x = st.number_input("Initial reserve X", min_value=1_000.0, value=100_000.0, step=1_000.0)
-    reserve_y = st.number_input("Initial reserve Y", min_value=1_000.0, value=100_000.0, step=1_000.0)
+    reserve_x = st.number_input("Initial reserve Token X", min_value=1_000.0, value=100_000.0, step=1_000.0)
+    reserve_y = st.number_input("Initial reserve Token Y", min_value=1_000.0, value=100_000.0, step=1_000.0)
     enable_shocks = st.checkbox("Enable shocks (fake news / whale / price jump)", value=True)
 
     st.header("Agents under test")
     st.caption(
         "Pick one to test a single agent, or several to run them as a live market. "
-        "Stub and rational baseline never call an API, so they can't fail or rate-limit."
     )
+    available_providers, unavailable_providers = _available_providers()
     provider_choices = st.multiselect(
         "Agents",
-        [STUB_LABEL, RATIONAL_LABEL] + sorted(PROVIDER_FACTORIES),
+        [STUB_LABEL, RATIONAL_LABEL] + available_providers,
         default=[STUB_LABEL],
     )
+
+    with st.expander("System prompt (sent to LLM agents)"):
+        st.caption(
+            "Edit to test how models respond to different instructions."
+        )
+        system_prompt = st.text_area(
+            "System prompt", value=SYSTEM_PROMPT, height=260, label_visibility="collapsed"
+        )
+
     agent_x = st.number_input("Each agent's starting X", min_value=0.0, value=500.0, step=50.0)
     agent_y = st.number_input("Each agent's starting Y", min_value=0.0, value=500.0, step=50.0)
 
@@ -115,7 +181,7 @@ for choice in provider_choices:
         st.warning(f"Skipped {choice!r}: {exc}")
         continue
 
-    llm_agent = LLMAgent(choice, provider=provider, **agent_kwargs)
+    llm_agent = LLMAgent(choice, provider=provider, system_prompt=system_prompt, **agent_kwargs)
     competitors.append(llm_agent)
     model_labels[llm_agent.name] = provider.label
 
@@ -203,7 +269,22 @@ for step in range(num_steps):
     tvl_metric.metric("TVL (Y)", f"{pool.get_tvl():,.0f}")
 
     price_rows.append({"step": step, "pool_price": pool_price, "reference_price": reference_price})
-    chart_placeholder.line_chart(pd.DataFrame(price_rows).set_index("step"))
+    price_df = pd.DataFrame(price_rows).rename(
+        columns={"pool_price": "Pool price", "reference_price": "Reference price"}
+    )
+    price_long = price_df.melt("step", var_name="series", value_name="price")
+    # zero=False: let the axis fit the actual price range instead of forcing
+    # a 0 baseline, which flattens fluctuations that hover around 1.0.
+    price_chart = (
+        alt.Chart(price_long)
+        .mark_line()
+        .encode(
+            x=alt.X("step:Q", title="Step"),
+            y=alt.Y("price:Q", title="Price (Y per X)", scale=alt.Scale(zero=False)),
+            color=alt.Color("series:N", title=None),
+        )
+    )
+    chart_placeholder.altair_chart(price_chart, width="stretch")
 
     # Every competitor sees the same news this tick (the scheduler caches it
     # per step), so any one of them can supply it for display.

@@ -369,9 +369,12 @@ class LLMAgent(TradingAgent):
     response) degrades to HOLD and sets ``llm_failed`` on the tick record.
     """
 
-    def __init__(self, *args, provider: Provider, **kwargs) -> None:
+    def __init__(
+        self, *args, provider: Provider, system_prompt: str | None = None, **kwargs
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.provider = provider
+        self.system_prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
         self.failures = 0
 
     @property
@@ -380,7 +383,7 @@ class LLMAgent(TradingAgent):
 
     def decide(self, observation: dict[str, Any]) -> dict[str, Any]:
         try:
-            text = self.provider.complete(SYSTEM_PROMPT, json.dumps(observation))
+            text = self.provider.complete(self.system_prompt, json.dumps(observation))
         except ProviderError as exc:
             return self._failed_tick(f"provider error: {exc}")
         except Exception as exc:  # noqa: BLE001 - a bad tick must not end the run

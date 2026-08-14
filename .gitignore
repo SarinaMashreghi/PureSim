@@ -7,10 +7,11 @@ __pycache__/
 # Run artifacts from run_safety.py
 report_card.json
 tick_log.json
-*.png
+
 
 # Secrets — API keys live in environment variables, never in the repo.
 .env
 .env.*
 *.key
 secrets.json
+.streamlit/secrets.toml
