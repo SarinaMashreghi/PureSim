@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
+.venv/
 
 # Run artifacts from run_safety.py
 report_card.json

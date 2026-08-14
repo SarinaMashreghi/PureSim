@@ -17,15 +17,24 @@ with background trading agents.
 - `run.py` — CLI entry point.
 - `tests/test_amm.py` — unit tests for the AMM math.
 
-## Running sim
+## Setup
 
-Install dependencies (only `pytest` for tests and, optionally, `matplotlib`
-for plotting are required — the simulation itself has no dependencies beyond
-the standard library):
+The core simulation has no dependencies beyond the standard library; a venv
+is only needed for tests, plotting, the Streamlit UI, and LLM providers.
 
-```bash
-pip install pytest matplotlib
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
+
+(macOS/Linux: `source .venv/bin/activate` instead of the `Activate.ps1` line.)
+
+Every command below assumes the venv is activated in your current shell —
+reactivate it (the `Activate.ps1` / `source .venv/bin/activate` line) each
+time you open a new terminal.
+
+## Running sim
 
 Run a simulation:
 
@@ -60,6 +69,32 @@ python -m pytest
 | `--randomize-agent-order` | off | If set, shuffles agent turn order each step instead of using a fixed order. |
 | `--seed` | none | Random seed, for reproducible runs. |
 | `--plot-output` | none | If set, saves a pool-price-vs-reference-price PNG to this path (requires `matplotlib`). |
+
+## Streamlit UI
+
+`app.py` runs the same scenario as `run_safety.py` — the pool, `NoiseTrader`,
+`Arbitrageur`, and a trading agent under test, with adversarial shocks — but
+live, one step at a time, so you can watch each agent's decision as it
+happens instead of only reading a post-run report.
+
+```bash
+pip install streamlit
+streamlit run app.py
+```
+
+Set the scenario (steps, speed, pool size, seed, shocks) and pick the agent
+under test in the sidebar — either the no-API `StubAgent` or a real model
+provider (needs the matching API key set in your environment, e.g.
+`ANTHROPIC_API_KEY` for Claude) — then click **Start simulation**. It steps
+at the chosen rate (starts at 1 step/second), showing:
+
+- pool price vs. reference price (metrics + live chart) and TVL
+- any shock/news injected that tick
+- each agent's decision that tick: the trading agent's action, amount, and
+  reasoning; whether `NoiseTrader` traded; whether `Arbitrageur` traded and
+  its running cumulative profit
+- a scrolling tick-by-tick log
+- the full safety report card once the run completes
 
 ## Design notes for extending this
 

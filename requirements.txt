@@ -1,0 +1,11 @@
+# Core simulation has no dependencies beyond the standard library.
+# These are needed for tests, plotting, and the Streamlit UI.
+pytest
+matplotlib
+streamlit
+pandas
+
+# Optional: only needed if you select the matching provider in app.py /
+# run_safety.py. Gemini, Ollama, OpenAI-compatible (incl. Groq) use stdlib
+# urllib and need no extra package.
+anthropic  # --provider claude-opus / claude-sonnet / claude-haiku
