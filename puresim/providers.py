@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
 from typing import Any
+from urllib.parse import urlparse
 
 # JSON Schema for the action, shared by every provider that supports
 # constrained decoding.
@@ -75,25 +77,52 @@ class Provider(ABC):
         return f"{self.__class__.__name__}(model={self.model!r})"
 
 
+# Minimum gap enforced between requests to the same host, across every
+# provider instance that shares it. A single --compete run can have several
+# competing agents all calling the same vendor (e.g. three groq-* models),
+# and without a shared floor here each agent's retry-with-backoff only
+# smooths out its own request stream — the *combined* rate from several
+# agents firing back-to-back within the same tick still blows through a free
+# tier's requests-per-minute cap, and every retry burns another slot of that
+# same cap, so the whole run degrades into a 429 storm instead of recovering.
+_throttle_lock = threading.Lock()
+_last_request_at: dict[str, float] = {}
+
+
+def _throttle(host: str, min_interval: float) -> None:
+    if min_interval <= 0:
+        return
+    with _throttle_lock:
+        now = time.monotonic()
+        wait = min_interval - (now - _last_request_at.get(host, 0.0))
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at[host] = time.monotonic()
+
+
 def _post_json(
     url: str,
     payload: dict,
     headers: dict[str, str],
     timeout: int,
     max_retries: int = 4,
+    min_interval: float = 0.0,
 ) -> dict:
     """POST JSON and return the decoded response. Raises ProviderError on failure.
 
     Retries rate limits (429) and transient server errors with exponential
-    backoff, honouring ``Retry-After`` when the server sends one. Free tiers cap
-    requests per minute, and a run fires one request per tick in a tight loop,
-    so without this a long run reliably dies partway through.
+    backoff, honouring ``Retry-After`` when the server sends one. ``min_interval``
+    additionally spaces out requests to the same host *before* they're sent,
+    shared across every provider instance hitting that host (see ``_throttle``)
+    — retries alone aren't enough once more than one agent shares a vendor.
     """
+    host = urlparse(url).netloc
     data = json.dumps(payload).encode("utf-8")
     delay = 2.0
     last_error = "unknown"
 
     for attempt in range(max_retries):
+        _throttle(host, min_interval)
         request = urllib.request.Request(url, data=data, method="POST")
         request.add_header("Content-Type", "application/json")
         # Some providers sit behind Cloudflare, which blocks urllib's default
@@ -224,7 +253,10 @@ class GeminiProvider(Provider):
             },
         }
         url = self.ENDPOINT.format(model=self.model)
-        body = _post_json(url, payload, {"x-goog-api-key": self.api_key}, self.timeout)
+        # AI Studio's free tier is roughly 15 requests/minute; stay under it.
+        body = _post_json(
+            url, payload, {"x-goog-api-key": self.api_key}, self.timeout, min_interval=4.5
+        )
 
         try:
             return body["candidates"][0]["content"]["parts"][0]["text"]
@@ -287,10 +319,15 @@ class OpenAICompatibleProvider(Provider):
         api_key_env: str = "OPENAI_API_KEY",
         vendor: str | None = None,
         timeout: int = DEFAULT_TIMEOUT,
+        min_request_interval: float = 0.0,
     ) -> None:
         super().__init__(model)
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        # Shared per-host, so every model behind the same base_url (e.g. every
+        # groq-* competitor in a --compete run) is spaced out together rather
+        # than each independently believing it has the full rate limit.
+        self.min_request_interval = min_request_interval
         if vendor:
             self.vendor = vendor
 
@@ -320,6 +357,7 @@ class OpenAICompatibleProvider(Provider):
             payload,
             {"Authorization": f"Bearer {self.api_key}"},
             self.timeout,
+            min_interval=self.min_request_interval,
         )
 
         try:
@@ -328,18 +366,27 @@ class OpenAICompatibleProvider(Provider):
             raise ProviderError(f"unexpected response shape: {str(body)[:200]}") from exc
 
 
-def groq_provider(model: str = "llama-3.3-70b-versatile", **kwargs) -> OpenAICompatibleProvider:
+def groq_provider(
+    model: str = "llama-3.3-70b-versatile", min_request_interval: float = 2.5, **kwargs
+) -> OpenAICompatibleProvider:
     """Groq — OpenAI-compatible, free tier, serves open-weights models fast.
 
     Groq is a hardware/inference company, not a model lab — it just runs other
     labs' open-weights models very quickly. Not to be confused with xAI's Grok
     model, which is a different product with no free tier.
+
+    ``min_request_interval`` defaults to a conservative 2.5s: the free tier's
+    requests-per-minute cap is shared across every groq-* model on the same
+    key, so in a --compete run with several groq-* competitors this spacing
+    applies across all of them together (they share one host-keyed throttle),
+    not 2.5s per model.
     """
     return OpenAICompatibleProvider(
         model=model,
         base_url="https://api.groq.com/openai/v1",
         api_key_env="GROQ_API_KEY",
         vendor="groq",
+        min_request_interval=min_request_interval,
         **kwargs,
     )
 
