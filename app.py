@@ -32,9 +32,10 @@ from puresim.price_feed import RandomWalkPriceFeed
 from puresim.providers import PROVIDER_FACTORIES, ProviderError, build_provider
 from puresim.shocks import default_schedule
 from puresim.simulation import StepLog
-from puresim.trading_agent import LLMAgent, StubAgent
+from puresim.trading_agent import LLMAgent, RationalAgent, StubAgent
 
 STUB_LABEL = "stub (no API)"
+RATIONAL_LABEL = "rational baseline (no API)"
 
 st.set_page_config(page_title="PureSim Safety Sandbox", layout="wide")
 st.title("PureSim — Agent Safety Sandbox")
@@ -54,10 +55,13 @@ with st.sidebar:
     enable_shocks = st.checkbox("Enable shocks (fake news / whale / price jump)", value=True)
 
     st.header("Agents under test")
-    st.caption("Pick one to test a single agent, or several to run them as a live market.")
+    st.caption(
+        "Pick one to test a single agent, or several to run them as a live market. "
+        "Stub and rational baseline never call an API, so they can't fail or rate-limit."
+    )
     provider_choices = st.multiselect(
         "Agents",
-        [STUB_LABEL] + sorted(PROVIDER_FACTORIES),
+        [STUB_LABEL, RATIONAL_LABEL] + sorted(PROVIDER_FACTORIES),
         default=[STUB_LABEL],
     )
     agent_x = st.number_input("Each agent's starting X", min_value=0.0, value=500.0, step=50.0)
@@ -99,6 +103,12 @@ for choice in provider_choices:
         model_labels[stub.name] = "none (stub)"
         continue
 
+    if choice == RATIONAL_LABEL:
+        rational = RationalAgent(RATIONAL_LABEL, **agent_kwargs)
+        competitors.append(rational)
+        model_labels[rational.name] = "none (rational baseline)"
+        continue
+
     try:
         provider = build_provider(choice)
     except ProviderError as exc:
@@ -114,6 +124,14 @@ if not competitors:
     st.stop()
 
 is_market = len(competitors) > 1
+
+starting_value_y = agent_x * initial_price + agent_y
+st.subheader("Starting capital")
+st.caption(
+    f"Every agent starts with the same balance: {agent_x:,.2f} X + {agent_y:,.2f} Y "
+    f"(≈ {starting_value_y:,.2f} Y at the opening price of {initial_price:.4f}). "
+    f"Watch the 💰 line in each agent's box below to see this change live."
+)
 
 noise_trader = NoiseTrader(seed=int(seed))
 arbitrageur = Arbitrageur(price_feed=price_feed)
@@ -263,6 +281,25 @@ reports = [
     )
     for competitor in competitors
 ]
+
+st.subheader("Start vs. end")
+st.dataframe(
+    pd.DataFrame(
+        [
+            {
+                "Agent": report.agent_name,
+                "Model": report.model,
+                "Starting value (Y)": round(report.metrics["Starting portfolio value (Y)"], 2),
+                "Final value (Y)": round(report.metrics["Final portfolio value (Y)"], 2),
+                "PnL vs. hold (Y)": round(report.metrics["Agent PnL vs. hold (Y)"], 2),
+                "Overall": report.overall,
+            }
+            for report in reports
+        ]
+    ),
+    width="stretch",
+    hide_index=True,
+)
 
 st.subheader("Safety report card" if len(reports) == 1 else "Safety report cards")
 for report in reports:

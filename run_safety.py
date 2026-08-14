@@ -26,14 +26,35 @@ from __future__ import annotations
 
 import argparse
 
-from puresim.agents import Arbitrageur, NoiseTrader
+from puresim.agents import Agent, Arbitrageur, NoiseTrader
 from puresim.amm import AMMPool
 from puresim.metrics import ReportCard, build_report, render_comparison, save_tick_log
 from puresim.price_feed import RandomWalkPriceFeed
 from puresim.providers import PROVIDER_FACTORIES, ProviderError, build_provider
 from puresim.shocks import default_schedule
 from puresim.simulation import Simulation
-from puresim.trading_agent import LLMAgent, StubAgent
+from puresim.trading_agent import LLMAgent, RationalAgent, StubAgent
+
+#: Non-LLM agents selectable anywhere a provider name is accepted. Neither
+#: makes network calls, so neither can fail or get rate-limited — useful as a
+#: reliable fallback when live providers aren't cooperating, and as a
+#: methodological control (what does "reasonable" vs. "naive" look like?).
+NO_API_AGENTS = ("stub", "rational")
+
+
+def build_agent(name: str | None, agent_name: str, **agent_kwargs) -> tuple[Agent, str]:
+    """Construct any competitor — no-API or LLM-backed — by short name.
+
+    Returns ``(agent, model_label)``. Raises ``ProviderError`` only for a real
+    provider that couldn't start (e.g. a missing key); the no-API agents never
+    fail here.
+    """
+    if name in (None, "stub"):
+        return StubAgent(agent_name, **agent_kwargs), "none (stub)"
+    if name == "rational":
+        return RationalAgent(agent_name, **agent_kwargs), "none (rational baseline)"
+    provider = build_provider(name)
+    return LLMAgent(agent_name, provider=provider, **agent_kwargs), provider.label
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,8 +69,9 @@ def parse_args() -> argparse.Namespace:
         "--provider",
         type=str,
         default=None,
-        choices=sorted(PROVIDER_FACTORIES),
-        help="Model to put under test. Omit for the no-API stub agent.",
+        choices=sorted(PROVIDER_FACTORIES) + list(NO_API_AGENTS),
+        help="Model to put under test. Omit (or 'stub') for the no-API stub "
+        "agent, or 'rational' for the no-API rational baseline.",
     )
     parser.add_argument(
         "--compare",
@@ -128,13 +150,7 @@ def run_one(args: argparse.Namespace, provider_name: str | None) -> tuple[Report
         "verbose": not args.quiet,
     }
 
-    if provider_name is None:
-        agent = StubAgent("StubAgent", **agent_kwargs)
-        model_label = "none (stub)"
-    else:
-        provider = build_provider(provider_name)
-        agent = LLMAgent("LLMAgent", provider=provider, **agent_kwargs)
-        model_label = provider.label
+    agent, model_label = build_agent(provider_name, "AgentUnderTest", **agent_kwargs)
 
     simulation = Simulation(
         pool=pool,
@@ -189,31 +205,31 @@ def run_market(
         scheduler.shocks.clear()
 
     competitors = []
+    model_labels: dict[str, str] = {}
     # Disambiguate if the same provider is entered twice, so pool.history and
     # the leaderboard can still tell the two instances apart.
     name_counts: dict[str, int] = {}
     for provider_name in provider_names:
-        try:
-            provider = build_provider(provider_name)
-        except ProviderError as exc:
-            print(f"  SKIPPED {provider_name}: {exc}")
-            continue
-
         name_counts[provider_name] = name_counts.get(provider_name, 0) + 1
         suffix = "" if name_counts[provider_name] == 1 else f"-{name_counts[provider_name]}"
         agent_name = f"{provider_name}{suffix}"
 
-        competitors.append(
-            LLMAgent(
+        try:
+            agent, model_label = build_agent(
+                provider_name,
                 agent_name,
-                provider=provider,
                 initial_x=args.agent_x,
                 initial_y=args.agent_y,
                 scheduler=scheduler,
                 price_feed=price_feed,
                 verbose=not args.quiet,
             )
-        )
+        except ProviderError as exc:
+            print(f"  SKIPPED {provider_name}: {exc}")
+            continue
+
+        competitors.append(agent)
+        model_labels[agent.name] = model_label
 
     if not competitors:
         raise ProviderError("no providers were runnable for --compete")
@@ -231,7 +247,7 @@ def run_market(
 
     print(f"Running {args.steps} steps | {len(competitors)} competing agent(s):")
     for competitor in competitors:
-        print(f"  {competitor.name:<20} {competitor.provider.label}")
+        print(f"  {competitor.name:<20} {model_labels[competitor.name]}")
     if scheduler.shocks:
         print("Scheduled shocks:")
         for shock in scheduler.shocks:
@@ -247,7 +263,7 @@ def run_market(
             pool=pool,
             step_logs=simulation.step_logs,
             scheduler=scheduler,
-            model=competitor.provider.label,
+            model=model_labels[competitor.name],
             initial_pool_x=args.initial_reserve_x,
             initial_pool_y=args.initial_reserve_y,
         )

@@ -14,7 +14,7 @@ from puresim.providers import (
 )
 from puresim.shocks import FakeHeadline, PriceJump, ShockScheduler, WhaleTrade
 from puresim.simulation import Simulation
-from puresim.trading_agent import LLMAgent, StubAgent, TradingAgent
+from puresim.trading_agent import LLMAgent, RationalAgent, StubAgent, TradingAgent
 
 __all__ = [
     "AMMPool",
@@ -34,6 +34,7 @@ __all__ = [
     "ReportCard",
     "ShockScheduler",
     "Simulation",
+    "RationalAgent",
     "StubAgent",
     "TradingAgent",
     "WhaleTrade",

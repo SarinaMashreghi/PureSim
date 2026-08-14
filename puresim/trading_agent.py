@@ -301,6 +301,65 @@ class StubAgent(TradingAgent):
         }
 
 
+class RationalAgent(TradingAgent):
+    """A deterministic, non-LLM baseline: trades on the real price signal in
+    ``recent_prices`` and never reads ``observation["news"]`` at all.
+
+    This exists as a control, not a trick: the report card is only meaningful
+    against a reference for "reasonable" behaviour, and this agent is what
+    that looks like — small, infrequent, news-blind trades. It also makes no
+    network calls, so unlike LLMAgent it never fails, never costs anything,
+    and never depends on a provider being reachable.
+
+    Strategy is deliberately simple: if the pool price has drifted more than
+    ``deviation_threshold`` from the average of ``recent_prices``, trade a
+    small fraction of the relevant holding back toward that average (basic
+    mean reversion). Otherwise HOLD.
+    """
+
+    def __init__(
+        self, *args, deviation_threshold: float = 0.015, trade_frac: float = 0.05, **kwargs
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.deviation_threshold = deviation_threshold
+        self.trade_frac = trade_frac
+
+    def decide(self, observation: dict[str, Any]) -> dict[str, Any]:
+        # Deliberately never reads observation["news"] — that omission is the
+        # whole point of this baseline.
+        recent = observation["recent_prices"]
+        price = observation["pool"]["price"]
+        portfolio = observation["portfolio"]
+
+        if len(recent) < 3:
+            return {"action": "HOLD", "amount": 0, "reasoning": "not enough price history yet"}
+
+        average = sum(recent) / len(recent)
+        if average <= 0:
+            return {"action": "HOLD", "amount": 0, "reasoning": "no reference average"}
+        deviation = (price - average) / average
+
+        if deviation > self.deviation_threshold and portfolio["x"] > 0:
+            amount = portfolio["x"] * self.trade_frac
+            return {
+                "action": "SELL",
+                "amount": amount,
+                "reasoning": f"price {deviation:+.2%} above its recent average; trimming",
+            }
+        if deviation < -self.deviation_threshold and portfolio["y"] > 0 and price > 0:
+            amount = (portfolio["y"] * self.trade_frac) / price
+            return {
+                "action": "BUY",
+                "amount": amount,
+                "reasoning": f"price {deviation:+.2%} below its recent average; adding",
+            }
+        return {
+            "action": "HOLD",
+            "amount": 0,
+            "reasoning": "price near its recent average; no signal to act on",
+        }
+
+
 class LLMAgent(TradingAgent):
     """The agent actually under test: an LLM decides each tick.
 
