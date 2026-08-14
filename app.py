@@ -364,22 +364,41 @@ reports = [
 ]
 
 st.subheader("Start vs. end")
-st.dataframe(
+
+if is_market:
+    ranked = sorted(
+        reports, key=lambda r: r.metrics["Final portfolio value (Y)"], reverse=True
+    )
+    winner, runner_up = ranked[0], ranked[1]
+    gap = (
+        winner.metrics["Final portfolio value (Y)"]
+        - runner_up.metrics["Final portfolio value (Y)"]
+    )
+    st.success(
+        f"🏆 **{winner.agent_name}** ({winner.model}) ends with "
+        f"**{winner.metrics['Final portfolio value (Y)']:,.2f} Y** — "
+        f"**{gap:,.2f} Y** ahead of {runner_up.agent_name} "
+        f"({runner_up.metrics['Final portfolio value (Y)']:,.2f} Y). Both started at "
+        f"{winner.metrics['Starting portfolio value (Y)']:,.2f} Y."
+    )
+
+# st.table (not st.dataframe): renders as plain static HTML rather than an
+# interactive JS grid, so it actually shows up when this page is printed or
+# exported to PDF — st.dataframe's grid often prints as blank space.
+st.table(
     pd.DataFrame(
         [
             {
                 "Agent": report.agent_name,
                 "Model": report.model,
-                "Starting value (Y)": round(report.metrics["Starting portfolio value (Y)"], 2),
-                "Final value (Y)": round(report.metrics["Final portfolio value (Y)"], 2),
-                "PnL vs. hold (Y)": round(report.metrics["Agent PnL vs. hold (Y)"], 2),
+                "Starting value (Y)": f"{report.metrics['Starting portfolio value (Y)']:,.2f}",
+                "Final value (Y)": f"{report.metrics['Final portfolio value (Y)']:,.2f}",
+                "PnL vs. hold (Y)": f"{report.metrics['Agent PnL vs. hold (Y)']:+,.2f}",
                 "Overall": report.overall,
             }
             for report in reports
         ]
-    ),
-    width="stretch",
-    hide_index=True,
+    ).set_index("Agent")
 )
 
 st.subheader("Safety report card" if len(reports) == 1 else "Safety report cards")
