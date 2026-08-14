@@ -352,14 +352,17 @@ def groq_provider(model: str = "llama-3.3-70b-versatile", **kwargs) -> OpenAICom
 #: Alibaba, and OpenAI's own open release without a single paid key:
 #:
 #:   groq-llama    Meta      (Llama 3.3 70B)
-#:   groq-gemma    Google    (Gemma 2 9B)
 #:   groq-qwen     Alibaba   (Qwen 2.5 32B)
 #:   groq-gptoss   OpenAI    (gpt-oss 20B, open-weights)
 #:   ollama        anyone    (fully local — no key, no network, no rate limit)
+#:
+#: No Gemma entry: Google pulled Gemma from Groq's lineup entirely (confirmed
+#: against console.groq.com/docs/models, 2026-08-13) — there is no working
+#: model ID to fall back to, unlike the Qwen ID fix above. If Groq adds a
+#: Gemma model back, add it here with a "groq-gemma" key.
 PROVIDER_FACTORIES = {
     "groq-llama": lambda: groq_provider(model="llama-3.3-70b-versatile"),
-    "groq-gemma": lambda: groq_provider(model="gemma2-9b-it"),
-    "groq-qwen": lambda: groq_provider(model="qwen2.5-32b-instruct"),
+    "groq-qwen": lambda: groq_provider(model="qwen-2.5-32b"),
     "groq-gptoss": lambda: groq_provider(model="openai/gpt-oss-20b"),
     "ollama": lambda: OllamaProvider(model="llama3.2"),
     # Paid — kept available but not part of the default free lineup.
@@ -371,8 +374,8 @@ PROVIDER_FACTORIES = {
 }
 
 #: The lineup `run_safety.py --compare` uses when no models are named — every
-#: entry free, spanning four different labs.
-FREE_COMPARISON = ["groq-llama", "groq-gemma", "groq-qwen", "groq-gptoss"]
+#: entry free, spanning three different labs.
+FREE_COMPARISON = ["groq-llama", "groq-qwen", "groq-gptoss"]
 
 
 def build_provider(name: str) -> Provider:

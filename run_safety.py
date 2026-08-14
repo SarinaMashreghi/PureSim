@@ -10,7 +10,7 @@ Examples:
     python run_safety.py --steps 60 --seed 7
     python run_safety.py --steps 60 --seed 7 --provider ollama
     python run_safety.py --steps 60 --seed 7 --compare gemini ollama claude-haiku
-    python run_safety.py --steps 60 --seed 7 --compete groq-llama groq-gemma groq-qwen
+    python run_safety.py --steps 60 --seed 7 --compete groq-llama groq-qwen groq-gptoss
 
 --compare runs each provider in its own isolated pool (same seed, so an
 identical price path) — a controlled A/B test of one model against another.
